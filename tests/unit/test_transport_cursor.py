@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 import pytest
+import base64
+import time
 from starlette.requests import Request
 from appchi.ingestion.gateway import gateway_identity, private_protocol
 from appchi.shared.cursors import Cursor
@@ -24,6 +26,11 @@ def test_gateway_headers_alone_never_authenticate():
         "headers": [
             (b"x-consumer-id", ids[0].encode()),
             (b"x-credential-identifier", ids[1].encode()),
+            (b"x-appchi-operator-id", ids[0].encode()),
+            (b"x-appchi-tenant-id", str(uuid4()).encode()),
+            (b"x-appchi-policy-generation", b"1"),
+            (b"x-appchi-routing-names", base64.b64encode(b'["Operator"]')),
+            (b"x-appchi-authorized-at", str(time.time()).encode()),
         ],
     }
     with pytest.raises(AppError):
