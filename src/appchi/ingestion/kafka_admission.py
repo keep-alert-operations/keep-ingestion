@@ -15,7 +15,10 @@ from appchi.ingestion.native import (
     validate_native,
 )
 from appchi.shared.errors import AppError
-from appchi.shared.transactions import wire
+from appchi.serialization import wire
+
+
+from appchi.ingestion.keys import received_key as received_key
 
 
 def validate_request(raw, version, request_key=None):
@@ -62,10 +65,6 @@ def validate_legacy_key(value, *, required=False):
         not isinstance(value, str) or not RETRY_ID.fullmatch(value)
     ):
         raise AppError("invalid_retry_id", "Invalid legacy sender identifier.", 422)
-
-
-def received_key(tenant, application, key):
-    return canonical([str(tenant), application, key])
 
 
 class KafkaPublisher:

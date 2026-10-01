@@ -57,14 +57,32 @@ def gateway_identity(request):
         authorized_at = float(authorized[0])
         if not math.isfinite(authorized_at) or not -2 <= time.time() - authorized_at < 10:
             raise ValueError()
-        if len(generations) != 1 or not generations[0].isascii() or not generations[0].isdigit() or not 0 < int(generations[0]) <= 2**63 - 1 or str(int(generations[0])) != generations[0] or len(names) != 1:
+        if (
+            len(generations) != 1
+            or not generations[0].isascii()
+            or not generations[0].isdigit()
+            or not 0 < int(generations[0]) <= 2**63 - 1
+            or str(int(generations[0])) != generations[0]
+            or len(names) != 1
+        ):
             raise ValueError()
         routing_names = json.loads(base64.b64decode(names[0], validate=True))
-        if not isinstance(routing_names, list) or not 1 <= len(routing_names) <= 2 or any(not isinstance(n, str) or not 1 <= len(n) <= 128 for n in routing_names):
+        if (
+            not isinstance(routing_names, list)
+            or not 1 <= len(routing_names) <= 2
+            or any(not isinstance(n, str) or not 1 <= len(n) <= 128 for n in routing_names)
+        ):
             raise ValueError()
     except (ValueError, TypeError):
         raise AppError("invalid_credential", "Invalid gateway policy context.", 401) from None
-    return GatewayIdentity(*values, operator_id=context[0], tenant_id=context[1], policy_generation=generations[0], routing_names=tuple(routing_names), authorized_at=authorized_at)
+    return GatewayIdentity(
+        *values,
+        operator_id=context[0],
+        tenant_id=context[1],
+        policy_generation=generations[0],
+        routing_names=tuple(routing_names),
+        authorized_at=authorized_at,
+    )
 
 
 def private_protocol(allowed_fingerprints):

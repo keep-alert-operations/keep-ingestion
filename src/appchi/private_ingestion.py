@@ -17,7 +17,7 @@ def main():
     values = {name: os.environ[name] for name in required}
     protocol = private_protocol(values["APPCHI_GATEWAY_PEER_SHA256"].split(","))
     uvicorn.run(
-        "appchi.main:app",
+        "appchi.ingestion.main:app",
         host=os.getenv("APPCHI_BIND_HOST", "127.0.0.1"),
         port=int(os.getenv("APPCHI_BIND_PORT", "8443")),
         http=protocol,
