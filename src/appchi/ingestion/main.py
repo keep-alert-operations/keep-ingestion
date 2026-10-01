@@ -1,6 +1,8 @@
 """Stateless Ingestion API; Kafka admission has no SQL/search/Redis lifecycle."""
 
 import os
+import json
+from appchi.visibility.profile import capture_profile
 from contextlib import asynccontextmanager
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -17,6 +19,12 @@ def create_app(settings=None):
         app.state.settings = settings or Settings(role=os.getenv("APPCHI_ROLE", "ingestion-api"))
         if app.state.settings.role not in ("ingestion-api", "private-ingestion"):
             raise RuntimeError("Ingestion requires a public or private ingestion role")
+        path = app.state.settings.capacity_profile
+        app.state.profile = json.loads(path.read_text()) if path else None
+        capture_profile(app.state.profile, deployment_epoch=app.state.settings.deployment_epoch)
+        if (app.state.profile and app.state.settings.environment != "development"
+                and not app.state.profile.get("qualified")):
+            raise RuntimeError("A qualified capacity profile is required outside development")
         app.state.db = None
         app.state.kafka_publisher = KafkaPublisher(app.state.settings)
         try:
