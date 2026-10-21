@@ -70,5 +70,6 @@ COPY --from=build /app/.venv /app/.venv
 ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 APPCHI_BIND_HOST=0.0.0.0
 RUN chgrp -R 0 /app && chmod -R g=rX /app
 USER 1001:0
-RUN python -c "import appchi.ingestion.main; import appchi.private_ingestion"
+# Fail the build when the native HTTP parser or event loop wheel is missing.
+RUN python -c "import appchi.ingestion.main; import appchi.private_ingestion; import httptools, uvloop"
 CMD ["python", "-m", "appchi.ingestion.cli"]

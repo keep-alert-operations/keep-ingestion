@@ -8,8 +8,8 @@ import ssl
 import math
 import time
 from uuid import UUID
-from uvicorn.protocols.http.h11_impl import H11Protocol
 
+from appchi.ingestion.http_protocol import BoundedHttpToolsProtocol
 from appchi.shared.errors import AppError
 
 
@@ -92,7 +92,7 @@ def private_protocol(allowed_fingerprints):
     ):
         raise ValueError("Configured gateway certificate SHA-256 fingerprints are required")
 
-    class PrivateGatewayH11(H11Protocol):
+    class PrivateGatewayHttpTools(BoundedHttpToolsProtocol):
         def __init__(self, *args, **kwargs):
             super().__init__(*args, **kwargs)
             original = self.app
@@ -111,4 +111,4 @@ def private_protocol(allowed_fingerprints):
 
             self.app = verified_app
 
-    return PrivateGatewayH11
+    return PrivateGatewayHttpTools
