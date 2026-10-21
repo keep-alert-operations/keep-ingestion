@@ -1,6 +1,7 @@
 """Kafka-first HTTP admission. No database access or application retry queue."""
 
 import asyncio
+import threading
 from datetime import UTC, datetime
 from time import monotonic, time
 from uuid import UUID, uuid4
@@ -67,6 +68,17 @@ def validate_legacy_key(value, *, required=False):
         raise AppError("invalid_retry_id", "Invalid legacy sender identifier.", 422)
 
 
+ATTEMPT_SECONDS = 1.1  # Application bound for one broker acknowledgement attempt.
+POLL_SECONDS = 0.1  # Poll-thread wake-up interval; delivery reports return immediately.
+_UNCONFIRMED = object()
+
+
+def _settle(future, error):
+    # Runs on the waiting loop. A cancelled or timed-out wait has already finished.
+    if not future.done():
+        future.set_result(error)
+
+
 class KafkaPublisher:
     def __init__(self, settings):
         from confluent_kafka import Producer
@@ -86,20 +98,74 @@ class KafkaPublisher:
             }
         )
 
-    async def publish(self, topic, key, value):
-        outcomes = []
-        self.producer.produce(
-            topic, key=key, value=value, on_delivery=lambda error, message: outcomes.append(error)
+        # One poll thread serves every delivery report; each publish awaits its own
+        # future on the caller's event loop, so several loops may share the producer.
+        self._lock = threading.Lock()
+        self._pending = set()
+        self._closed = False
+        self._stopping = threading.Event()
+        self._poller = threading.Thread(
+            target=self._poll_deliveries, name="appchi-kafka-delivery", daemon=True
         )
-        deadline = monotonic() + 1.1
-        while not outcomes and monotonic() < deadline:
-            self.producer.poll(0)
-            await asyncio.sleep(0.005)
-        if not outcomes or outcomes[0] is not None:
-            raise RuntimeError("kafka_publish_unconfirmed")
+        self._poller.start()
+
+    def _poll_deliveries(self):
+        while not self._stopping.is_set():
+            try:
+                # Returns as soon as delivery reports were served.
+                self.producer.poll(POLL_SECONDS)
+            except Exception:
+                # A failing callback or transient client error must not stop delivery
+                # reporting for the remaining in-flight records.
+                continue
+
+    @staticmethod
+    def _report(loop, future, error):
+        # Runs on the poll (or flush) thread; never raises into librdkafka.
+        try:
+            loop.call_soon_threadsafe(_settle, future, error)
+        except RuntimeError:
+            pass  # The waiting loop has closed; nobody awaits this outcome anymore.
+
+    async def publish(self, topic, key, value):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        entry = (loop, future)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("kafka_publish_unconfirmed")
+            self._pending.add(entry)
+        try:
+            self.producer.produce(
+                topic,
+                key=key,
+                value=value,
+                on_delivery=lambda error, message: self._report(loop, future, error),
+            )
+            try:
+                async with asyncio.timeout(ATTEMPT_SECONDS):
+                    error = await future
+            except TimeoutError:
+                error = _UNCONFIRMED
+            if error is not None:
+                raise RuntimeError("kafka_publish_unconfirmed")
+        finally:
+            with self._lock:
+                self._pending.discard(entry)
 
     def close(self):
-        self.producer.flush(1.1)
+        with self._lock:
+            self._closed = True
+        self._stopping.set()
+        self._poller.join()
+        try:
+            self.producer.flush(ATTEMPT_SECONDS)
+        finally:
+            # Anything still unconfirmed fails now instead of waiting out its bound.
+            with self._lock:
+                pending, self._pending = list(self._pending), set()
+            for loop, future in pending:
+                self._report(loop, future, _UNCONFIRMED)
 
 
 class KafkaAdmission:
