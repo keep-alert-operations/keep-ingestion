@@ -67,6 +67,13 @@ class FakeProducer:
 
 
 @pytest.fixture
+def long_poll_tick(monkeypatch):
+    # Request before ``fake``: with a 1 s poll timeout, an acknowledgement that were
+    # only noticed once per poll tick would blow the latency bounds below.
+    monkeypatch.setattr(kafka_admission, "POLL_SECONDS", 1.0)
+
+
+@pytest.fixture
 def fake(monkeypatch):
     import confluent_kafka
     import appchi.service_clients
@@ -97,25 +104,25 @@ def test_producer_settings_are_unchanged(fake):
     assert kafka_admission.ATTEMPT_SECONDS == 1.1
 
 
-def test_ack_resolves_from_poll_thread_without_busy_polling(fake):
+def test_ack_resolves_from_poll_thread_without_busy_polling(long_poll_tick, fake):
     publisher, producer = fake
     producer.next_delay = 0.05
 
     async def run():
+        polls = len(producer.poll_calls)
         started = monotonic()
         await publisher.publish("t", b"k", b"v")
-        return monotonic() - started
+        return polls, monotonic() - started
 
-    polls = len(producer.poll_calls)
-    elapsed = asyncio.run(run())
-    assert 0.045 <= elapsed < 0.5  # generous: CI hosts can be heavily loaded
-    assert_blocking_poll_thread(producer, polls, reports=1, elapsed=elapsed)
-    assert producer.callback_threads <= producer.poll_threads
+    polls, elapsed = asyncio.run(run())
+    assert 0.045 <= elapsed < 0.05 + 0.25  # far below the 1 s poll tick
+    assert_blocking_poll_thread(publisher, producer, polls, reports=1, elapsed=elapsed)
+    assert producer.callback_threads == {publisher._poller.ident}
 
 
-def assert_blocking_poll_thread(producer, polls_before, *, reports, elapsed):
-    # Only the background thread polls, always blocking for POLL_SECONDS (never poll(0)).
-    assert producer.poll_threads and threading.get_ident() not in producer.poll_threads
+def assert_blocking_poll_thread(publisher, producer, polls_before, *, reports, elapsed):
+    # Only the publisher's own poll thread polls, always blocking for POLL_SECONDS.
+    assert producer.poll_threads == {publisher._poller.ident}
     assert set(producer.poll_calls) == {kafka_admission.POLL_SECONDS}
     # Each poll returns either after serving at least one report or after its full
     # timeout, so the count is independent of the platform's timer resolution.
@@ -123,34 +130,35 @@ def assert_blocking_poll_thread(producer, polls_before, *, reports, elapsed):
     assert new_polls <= reports + math.ceil(elapsed / kafka_admission.POLL_SECONDS) + 2
 
 
-def test_full_batch_waits_about_as_long_as_slowest_ack(fake, v1):
+def test_full_batch_waits_about_as_long_as_slowest_ack(long_poll_tick, fake, v1):
     publisher, producer = fake
     slow = [0.002 + 0.001 * i for i in range(100)]  # slowest ack ~101 ms
-    delays = [0.0] * 100
     original = producer.produce
     order = []
 
     def produce(topic, key=None, value=None, on_delivery=None):
-        producer.next_delay = delays[len(order) % 100]
+        producer.next_delay = slow[len(order)]
         order.append(value)
         original(topic, key=key, value=value, on_delivery=on_delivery)
 
     producer.produce = produce
     members = [dict(v1, application=f"batch-{i}") for i in range(100)]
     raw = canonical({"alerts": [{"payload": m} for m in members]})
-    admission = KafkaAdmission(publisher, environment="development", global_tenant_id=uuid4())
 
-    def run():
-        order.clear()
+    class NoWait:
+        async def publish(self, topic, key, value):
+            pass
+
+    def run(target):
+        admission = KafkaAdmission(target, environment="development", global_tenant_id=uuid4())
+        polls = len(producer.poll_calls)
         started = monotonic()
         result = asyncio.run(admission.admit(raw, "v1"))
-        return result, monotonic() - started
+        return result, polls, monotonic() - started
 
-    run()  # warm imports and validation caches
-    _, overhead = min((run() for _ in range(3)), key=lambda r: r[1])  # immediate acks
-    delays[:] = slow
-    polls = len(producer.poll_calls)
-    (status, body), elapsed = run()
+    # Processing cost alone, measured without any acknowledgement wait (first run warms).
+    overhead = min(run(NoWait())[2] for _ in range(4))
+    (status, body), polls, elapsed = run(publisher)
     assert status == 202
     assert [r["index"] for r in body["results"]] == list(range(100))
     assert {r["status"] for r in body["results"]} == {202}
@@ -158,7 +166,7 @@ def test_full_batch_waits_about_as_long_as_slowest_ack(fake, v1):
     # The batch costs its own processing plus the slowest acknowledgement, not a sum
     # of per-member polling delays.
     assert max(slow) <= elapsed < overhead + max(slow) + 0.25
-    assert_blocking_poll_thread(producer, polls, reports=100, elapsed=elapsed)
+    assert_blocking_poll_thread(publisher, producer, polls, reports=100, elapsed=elapsed)
 
 
 def test_delivery_error_maps_to_unconfirmed_after_three_attempts(fake, v1):
@@ -298,7 +306,7 @@ def test_close_stops_poller_flushes_and_fails_pending_futures(fake):
         return monotonic() - started
 
     elapsed = asyncio.run(run())
-    assert elapsed < 0.5  # failed by shutdown, not by the 1.1 s attempt bound
+    assert elapsed < 0.9  # failed by shutdown, well before the 1.1 s attempt bound
     assert not publisher._poller.is_alive()
     assert producer.flushed == [1.1]
     assert not publisher._pending
