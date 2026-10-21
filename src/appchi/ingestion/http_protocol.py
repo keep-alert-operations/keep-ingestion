@@ -21,6 +21,10 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
     ``h11_max_incomplete_event_size`` (16 KiB by default), stripped trailing
     whitespace, ignored trailers and rejected an HTTP/1.1 request without exactly one
     Host. This class restores those rules; violations get uvicorn's usual 400 reply.
+
+    Reads are fed to the parser in slices of at most the head limit and the bound is
+    checked after each slice, so a large read cannot carry an oversized head past
+    it: an accepted head spans at most the limit plus one completing slice.
     """
 
     def __init__(self, config, *args, **kwargs):
@@ -29,14 +33,12 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
             config.h11_max_incomplete_event_size or DEFAULT_MAX_INCOMPLETE_HEAD
         )
         self.head_complete = True
-        self.head_bytes = 0  # bytes read for the current head after the read that began it
-        self.head_began_in_read = False
+        self.head_bytes = 0  # bytes fed while the current head was still incomplete
 
     def on_message_begin(self):
         super().on_message_begin()
         self.head_complete = False
         self.head_bytes = 0
-        self.head_began_in_read = True
 
     def on_header(self, name, value):
         if not self.head_complete:  # trailer fields never reach the application
@@ -50,14 +52,22 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         super().on_headers_complete()
 
     def data_received(self, data):
-        super().data_received(data)
-        if self.head_complete or self.transport.is_closing():
+        if self.transport.is_closing():  # e.g. TLS data still flushing after a 400
             return
-        if self.head_began_in_read:
-            self.head_began_in_read = False
-            return
-        self.head_bytes += len(data)
-        if self.head_bytes > self.max_incomplete_head:
-            self.head_complete = True
-            self.logger.warning(INVALID_REQUEST)
-            self.send_400_response(INVALID_REQUEST)
+        view = memoryview(data)
+        step = self.max_incomplete_head
+        for start in range(0, len(view), step):
+            piece = view[start:start + step]
+            super().data_received(piece)
+            if self.transport.is_closing() or self.parser is None:
+                return
+            if self.transport.get_protocol() is not self:  # handed to a WebSocket protocol
+                return
+            if self.head_complete:
+                continue
+            self.head_bytes += len(piece)
+            if self.head_bytes > self.max_incomplete_head:
+                self.head_complete = True
+                self.logger.warning(INVALID_REQUEST)
+                self.send_400_response(INVALID_REQUEST)
+                return

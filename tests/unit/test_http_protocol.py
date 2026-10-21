@@ -179,6 +179,25 @@ def test_oversized_incomplete_head_is_rejected(port):
     assert result in (None, (400, b"Invalid HTTP request received."))
 
 
+@pytest.mark.parametrize("size", [20 * 1024, 200 * 1024])
+def test_oversized_head_in_one_write_is_rejected_before_it_completes(port, size):
+    with socket.create_connection(("127.0.0.1", port), timeout=10) as conn:
+        conn.sendall(b"GET / HTTP/1.1\r\nHost: x\r\nX-Big: " + b"a" * size)
+        time.sleep(0.3)
+        try:
+            conn.sendall(b"\r\n\r\n")
+            _, result = _read_response(conn)
+        except (ConnectionResetError, ConnectionAbortedError, BrokenPipeError):
+            result = None
+    assert result in (None, (400, b"Invalid HTTP request received."))
+
+
+def test_complete_heads_in_one_large_write_are_accepted(port):
+    head = b"GET / HTTP/1.1\r\nHost: x\r\nX-Big: " + b"a" * 15000 + b"\r\n\r\n"
+    data = _json(_exchange(port, head + head))
+    assert len(data["headers"][1][1]) == 15000
+
+
 def test_keep_alive_serves_sequential_requests(port):
     with socket.create_connection(("127.0.0.1", port), timeout=10) as conn:
         for path in (b"/1", b"/2"):
