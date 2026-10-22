@@ -25,8 +25,9 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
     - rejects a head larger than ``h11_max_incomplete_event_size`` (16 KiB by
       default), and a chunk-size line or trailer section that grows past it;
     - strips trailing whitespace from field values and ignores trailer fields;
-    - rejects an HTTP/1.1 request without exactly one Host, and a Transfer-Encoding
-      whose final coding is not chunked, before the application is called;
+    - rejects an HTTP/1.1 request without exactly one Host, and any Transfer-Encoding
+      other than one field with the single coding chunked, before the application
+      is called;
     - rejects CONNECT, and an unsupported Upgrade that declares a body, and stops
       parsing the read after a bodiless unsupported Upgrade as uvicorn does.
 
@@ -49,6 +50,7 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         self.body_progress = False
         self.stalled_bytes = 0  # body-phase bytes fed without body data (chunk lines, trailers)
         self.stop_reading = False
+        self.transfer_codings = []
         self.running_cycle = None  # the cycle whose application task started last
 
     def _start_asgi_task(self, cycle, app):
@@ -77,6 +79,7 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         self.head_bytes = 0
         self.head_began_in_slice = True
         self.stalled_bytes = 0
+        self.transfer_codings = []  # raw Transfer-Encoding values, as llhttp reads them
 
     def on_url(self, url):
         self.head_known += len(url)
@@ -84,6 +87,8 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
 
     def on_header(self, name, value):
         if not self.head_complete:  # trailer fields never reach the application
+            if name.lower() == b"transfer-encoding":
+                self.transfer_codings.append(value)
             value = value.rstrip(_OWS)
             self.head_known += len(name) + len(value) + 4
             super().on_header(name, value)
@@ -98,10 +103,11 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         hosts = sum(1 for name, _ in self.headers if name == b"host")
         if hosts > 1 or (hosts == 0 and self.parser.get_http_version() == "1.1"):
             raise InvalidRequestHead("HTTP/1.1 requires exactly one Host header")
-        codings = b",".join(value for name, value in self.headers if name == b"transfer-encoding")
-        if codings and codings.rsplit(b",", 1)[-1].strip().lower() != b"chunked":
-            # llhttp rejects it only after the application has been dispatched.
-            raise InvalidRequestHead("The final transfer coding must be chunked")
+        codings = self.transfer_codings
+        if codings and (len(codings) != 1 or codings[0].rstrip(b" ").lower() != b"chunked"):
+            # As h11: one field with the single coding "chunked". llhttp would reject
+            # other codings (and a trailing tab) only after dispatching the application.
+            raise InvalidRequestHead("Transfer-Encoding must be exactly chunked")
         if self.parser.should_upgrade() and not self._should_upgrade():
             # llhttp skips the declared body of an upgrade and would parse it as a request.
             if method == b"CONNECT" or self._declares_body():

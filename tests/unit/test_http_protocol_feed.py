@@ -137,6 +137,32 @@ def test_non_chunked_final_coding_is_rejected_before_dispatch(connection, pendin
         assert transport.output.startswith(b"HTTP/1.1 400 ") and transport.output.endswith(INVALID)
 
 
+@pytest.mark.parametrize("fields", [
+    b"Transfer-Encoding: gzip, chunked\r\n",
+    b"Transfer-Encoding: chunked, chunked\r\n",
+    b"Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n",
+    b"Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n",
+    b"Transfer-Encoding: chunked\t\r\n",  # llhttp itself rejects this only after dispatch
+], ids=["gzip-chunked", "chunked-chunked", "two-fields", "two-fields-gzip-first",
+        "trailing-tab"])
+def test_transfer_encoding_must_be_exactly_chunked(connection, fields):
+    protocol, transport, seen, run = connection
+    _feed(protocol, b"POST /te HTTP/1.1\r\nHost: x\r\n" + fields + b"\r\n5\r\nhello\r\n0\r\n\r\n")
+    run()
+    assert seen == [] and transport.closed
+    assert transport.output.count(b"HTTP/1.1 ") == 1
+    assert transport.output.startswith(b"HTTP/1.1 400 ") and transport.output.endswith(INVALID)
+
+
+def test_mixed_case_chunked_with_trailing_whitespace_is_accepted(connection):
+    protocol, transport, seen, run = connection
+    _feed(protocol, b"POST /te HTTP/1.1\r\nHost: x\r\nTransfer-Encoding:  ChUnKeD  \r\n\r\n"
+                    b"5\r\nhello\r\n0\r\n\r\n")
+    run()
+    assert [(path, length) for path, _, length in seen] == [("/te", 5)]
+    assert not transport.closed and transport.output.startswith(b"HTTP/1.1 200 ")
+
+
 @pytest.mark.parametrize("pending", [False, True], ids=["alone", "behind-wait"])
 def test_body_parse_error_gets_400_only_when_no_response_is_pending(connection, pending):
     protocol, transport, seen, run = connection
