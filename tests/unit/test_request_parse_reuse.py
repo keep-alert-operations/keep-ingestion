@@ -2,6 +2,7 @@
 
 import base64
 import json
+import sys
 import time
 from types import SimpleNamespace
 
@@ -287,3 +288,68 @@ async def test_non_json_and_oversized_bodies_are_rejected_before_parsing(ingest)
     assert large.status_code == 413
     assert large.json()["error"]["code"] == "body_too_large"
     assert not ingest.calls
+
+
+def _stack_depth():
+    frame, depth = sys._getframe(), 0
+    while frame is not None:
+        frame, depth = frame.f_back, depth + 1
+    return depth
+
+
+def _with_headroom(frames, function):
+    # Recurse until only ``frames`` Python frames remain below the recursion limit.
+    def burn():
+        if sys.getrecursionlimit() - _stack_depth() > frames:
+            return burn()
+        return function()
+
+    return burn()
+
+
+@pytest.mark.parametrize("shape", ["single", "batch"])
+def test_payload_depth_no_longer_depends_on_remaining_stack(shape):
+    # The old object_slices walk recursed once per nesting level from the handler's
+    # deeper stack. A body the middleware parse had accepted (about 971-976 levels
+    # under the real server) then failed the whole request with 400 invalid_json.
+    # Admission now judges such a member on its own: a single body is 422 and a
+    # batch is 207 with its valid member published, with the same bytes as before.
+    deep = "[" * 200 + "]" * 200
+    raw = (
+        '{"x":%s}' % deep
+        if shape == "single"
+        else '{"alerts":[{"payload":%s},{"payload":{"x":%s}}]}' % (json.dumps(v1("a")), deep)
+    ).encode()
+    parsed = parse_json(raw)
+
+    def old_slices():
+        try:
+            object_slices(raw)
+        except AppError as error:
+            return error.code
+        return "ok"
+
+    assert _with_headroom(120, old_slices) == "invalid_json"
+    results = _with_headroom(120, lambda: validate_request(raw, "v1", parsed=parsed))
+    if shape == "single":
+        assert [(r[0], r[1], r[2]["code"]) for r in results] == [(None, b"", "invalid_fields")]
+    else:
+        assert results[0][1] == json.dumps(v1("a")).encode() and results[0][2] is None
+        assert results[1][2]["code"] == "invalid_fields"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("shape", "status"), [("single", 422), ("batch", 207)])
+async def test_deep_member_statuses(ingest, shape, status):
+    deep = "[" * 200 + "]" * 200
+    body = (
+        '{"x":%s}' % deep
+        if shape == "single"
+        else '{"alerts":[{"payload":%s},{"payload":{"x":%s}}]}' % (json.dumps(v1("a")), deep)
+    ).encode()
+    response = await post(ingest, "/api/ingest/v1/alerts", body)
+    assert response.status_code == status
+    assert len(ingest.calls) == 1
+    assert [json.loads(v)["raw_json"] for _, _, v in ingest.publisher.records] == (
+        [json.dumps(v1("a"))] if shape == "batch" else []
+    )
