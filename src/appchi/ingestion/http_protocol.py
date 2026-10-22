@@ -25,13 +25,15 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
     - rejects a head larger than ``h11_max_incomplete_event_size`` (16 KiB by
       default), and a chunk-size line or trailer section that grows past it;
     - strips trailing whitespace from field values and ignores trailer fields;
-    - rejects an HTTP/1.1 request without exactly one Host;
+    - rejects an HTTP/1.1 request without exactly one Host, and a Transfer-Encoding
+      whose final coding is not chunked, before the application is called;
     - rejects CONNECT, and an unsupported Upgrade that declares a body, and stops
       parsing the read after a bodiless unsupported Upgrade as uvicorn does.
 
-    Violations get uvicorn's usual 400 reply, or a close when a response to an
-    earlier request on the connection is still in progress. Reads are fed to the
-    parser in slices no longer than the limit and checked after each slice.
+    Violations get uvicorn's usual 400 reply. When a response is still pending on
+    the connection, the connection is closed instead, so no 400 is written before or
+    into that response, and every running request sees ``http.disconnect``. Reads
+    are fed to the parser in slices no longer than the limit and checked after each.
     """
 
     def __init__(self, config, *args, **kwargs):
@@ -47,6 +49,24 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         self.body_progress = False
         self.stalled_bytes = 0  # body-phase bytes fed without body data (chunk lines, trailers)
         self.stop_reading = False
+        self.running_cycle = None  # the cycle whose application task started last
+
+    def _start_asgi_task(self, cycle, app):
+        self.running_cycle = cycle
+        super()._start_asgi_task(cycle, app)
+
+    def connection_lost(self, exc):
+        # uvicorn only notifies self.cycle, which may be a queued pipelined request.
+        self._disconnect_cycles()
+        super().connection_lost(exc)
+
+    def _disconnect_cycles(self):
+        for cycle in {id(c): c for c in (self.cycle, self.running_cycle) if c}.values():
+            if not cycle.response_complete:
+                cycle.disconnected = True
+            cycle.message_event.set()
+        if self.flow is not None:
+            self.flow.resume_writing()  # release an application blocked in drain()
 
     # Parser callbacks
     def on_message_begin(self):
@@ -78,6 +98,10 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         hosts = sum(1 for name, _ in self.headers if name == b"host")
         if hosts > 1 or (hosts == 0 and self.parser.get_http_version() == "1.1"):
             raise InvalidRequestHead("HTTP/1.1 requires exactly one Host header")
+        codings = b",".join(value for name, value in self.headers if name == b"transfer-encoding")
+        if codings and codings.rsplit(b",", 1)[-1].strip().lower() != b"chunked":
+            # llhttp rejects it only after the application has been dispatched.
+            raise InvalidRequestHead("The final transfer coding must be chunked")
         if self.parser.should_upgrade() and not self._should_upgrade():
             # llhttp skips the declared body of an upgrade and would parse it as a request.
             if method == b"CONNECT" or self._declares_body():
@@ -105,15 +129,18 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
         self.send_400_response(INVALID_REQUEST)
 
     def send_400_response(self, msg):
-        # Also reached from uvicorn for parser and callback errors on pipelined data.
+        # Also reached from uvicorn for every parser and callback error.
         cycle = self.cycle
-        if cycle is not None and not cycle.response_complete:
-            # A 400 could precede or interleave with a response still in progress.
-            cycle.disconnected = True
-            cycle.message_event.set()
-            self.transport.close()
+        if cycle is None or cycle.response_complete:
+            super().send_400_response(msg)
             return
-        super().send_400_response(msg)
+        self._disconnect_cycles()
+        if not self.pipeline and not cycle.response_started and cycle.more_body:
+            # The error is in the body of the only request, which has no response yet.
+            super().send_400_response(msg)
+        else:
+            # A 400 could precede or interleave with a response still in progress.
+            self.transport.close()
 
     def data_received(self, data):
         if self.transport.is_closing():  # e.g. TLS data still flushing after a 400

@@ -65,6 +65,8 @@ def connection():
         seen.append((scope["path"], dict(scope["headers"]), len(body)))
         if scope["path"] == "/wait":
             await run.gate.wait()
+        if scope["path"] == "/listen":  # like an SSE stream watching for disconnect
+            run.events.append((await receive())["type"])
         await send({"type": "http.response.start", "status": 200,
                     "headers": [(b"content-length", b"2")]})
         await send({"type": "http.response.body", "body": b"ok"})
@@ -82,6 +84,7 @@ def connection():
             loop.run_until_complete(asyncio.sleep(0))
 
     run.gate = asyncio.Event()  # holds the response to /wait until set
+    run.events = []  # what /listen received after its body
     yield protocol, transport, seen, run
     for task in list(protocol.tasks):
         task.cancel()
@@ -111,6 +114,79 @@ def test_invalid_pipelined_head_closes_without_writing_over_a_pending_response(
     run.gate.set()
     run()
     assert transport.written == [] and [path for path, _, _ in seen] == ["/wait"]
+
+
+WAIT = b"POST /wait HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok"
+NON_CHUNKED_CODING = b"POST /te HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip\r\n\r\nhello"
+BAD_CHUNK = b"POST /c HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\nzz\r\n"
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["alone", "behind-wait"])
+def test_non_chunked_final_coding_is_rejected_before_dispatch(connection, pending):
+    protocol, transport, seen, run = connection
+    _feed(protocol, *((WAIT,) if pending else ()), NON_CHUNKED_CODING)
+    run()
+    assert [path for path, _, _ in seen] == (["/wait"] if pending else [])
+    assert transport.closed
+    if pending:
+        run.gate.set()
+        run()
+        assert transport.written == []
+    else:
+        assert transport.output.count(b"HTTP/1.1 ") == 1
+        assert transport.output.startswith(b"HTTP/1.1 400 ") and transport.output.endswith(INVALID)
+
+
+@pytest.mark.parametrize("pending", [False, True], ids=["alone", "behind-wait"])
+def test_body_parse_error_gets_400_only_when_no_response_is_pending(connection, pending):
+    protocol, transport, seen, run = connection
+    _feed(protocol, *((WAIT,) if pending else ()), BAD_CHUNK)
+    run()
+    assert transport.closed
+    if pending:
+        run.gate.set()
+        run()
+        assert transport.written == []
+    else:
+        # The application saw a disconnect and wrote nothing; only the 400 went out.
+        assert [(path, length) for path, _, length in seen] == [("/c", 0)]
+        assert transport.output.count(b"HTTP/1.1 ") == 1
+        assert transport.output.startswith(b"HTTP/1.1 400 ") and transport.output.endswith(INVALID)
+
+
+def test_oversized_incomplete_head_behind_a_pending_response_closes_silently(connection):
+    protocol, transport, seen, run = connection
+    _feed(protocol, WAIT)
+    run()
+    _feed(protocol, b"GET /2 HTTP/1.1\r\nHost: x\r\nX-Big: " + b"a" * 200 * 1024)
+    run()
+    assert transport.closed and transport.written == []
+    run.gate.set()
+    run()
+    assert transport.written == [] and [path for path, _, _ in seen] == ["/wait"]
+
+
+def test_running_request_sees_disconnect_when_a_queued_one_is_rejected(connection):
+    protocol, transport, seen, run = connection
+    _feed(protocol, b"POST /listen HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok")
+    run()
+    _feed(protocol, b"GET /queued HTTP/1.1\r\nHost: x\r\n\r\nGARBAGE\r\n\r\n")
+    run()
+    assert run.events == ["http.disconnect"]
+    assert transport.closed and transport.written == [] and not protocol.tasks
+
+
+def test_close_releases_an_application_blocked_on_write_flow_control(connection):
+    protocol, transport, seen, run = connection
+    _feed(protocol, WAIT)
+    run()
+    protocol.pause_writing()
+    run.gate.set()
+    run()
+    assert protocol.tasks and transport.written == []  # parked in flow.drain()
+    _feed(protocol, b"GARBAGE\r\n\r\n")
+    run()
+    assert transport.closed and transport.written == [] and not protocol.tasks
 
 
 def test_oversized_incomplete_head_gets_exactly_one_400_and_close(connection):
