@@ -8,7 +8,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 from appchi.config import Settings
 from appchi.http import create_http_app
-from appchi.ingestion.kafka_admission import KafkaAdmission, KafkaPublisher
+from appchi.ingestion.kafka_admission import UNPARSED, KafkaAdmission, KafkaPublisher
 from appchi.ingestion.schemas import request_schema, admission_responses
 from appchi.shared.errors import unavailable
 
@@ -33,6 +33,11 @@ def create_app(settings=None):
             app.state.kafka_publisher.close()
 
     app = create_http_app(lifespan)
+
+    def parsed_body(request):
+        # The protocol middleware already parsed and validated this body. A domain
+        # without that state makes admission parse it again rather than fail.
+        return getattr(request.state, "json_body", UNPARSED)
 
     def admission(request):
         settings = request.app.state.settings
@@ -64,6 +69,7 @@ def create_app(settings=None):
             "v1",
             request.headers.get("idempotency-key"),
             received_at=request.state.received_at,
+            parsed=parsed_body(request),
         )
         result["request_id"] = request.state.request_id
         return JSONResponse(result, status)
@@ -90,6 +96,7 @@ def create_app(settings=None):
             request.headers.get("idempotency-key"),
             gateway,
             received_at=request.state.received_at,
+            parsed=parsed_body(request),
         )
         result["request_id"] = request.state.request_id
         return JSONResponse(result, status)

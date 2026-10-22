@@ -1,6 +1,9 @@
 """Kafka-first HTTP admission. No database access or application retry queue."""
 
 import asyncio
+import json
+import re
+import threading
 from datetime import UTC, datetime
 from time import monotonic, time
 from uuid import UUID, uuid4
@@ -10,7 +13,6 @@ from appchi.ingestion.native import (
     canonical,
     format_native_time,
     identity,
-    object_slices,
     parse_json,
     validate_native,
 )
@@ -21,10 +23,17 @@ from appchi.serialization import wire
 from appchi.ingestion.keys import received_key as received_key
 
 
-def validate_request(raw, version, request_key=None):
+UNPARSED = object()
+_JSON_SPACE = re.compile(r"[ \t\n\r]*")
+_DECODER = json.JSONDecoder()
+
+
+def validate_request(raw, version, request_key=None, *, parsed=UNPARSED):
+    """Validate a native body; ``parsed`` is the ``parse_json(raw)`` value when already known."""
     if len(raw) > 4 * 1024 * 1024:
         raise AppError("body_too_large", "Ingestion body exceeds 4 MiB.", 413)
-    parsed = parse_json(raw)
+    if parsed is UNPARSED:
+        parsed = parse_json(raw)
     if not isinstance(parsed, dict):
         raise AppError("invalid_envelope", "Expected an object.", 400)
     batch = "alerts" in parsed
@@ -35,7 +44,7 @@ def validate_request(raw, version, request_key=None):
     if not batch and len(raw) > 65536:
         raise AppError("body_too_large", "Single objects are limited to 64 KiB.", 413)
     validate_legacy_key(request_key)
-    slices = object_slices(raw)
+    slices = _payload_slices(raw) if batch else None
     members = parsed["alerts"] if batch else [{"payload": parsed}]
     results = []
     for index, member in enumerate(members):
@@ -50,7 +59,9 @@ def validate_request(raw, version, request_key=None):
                 )
             if "event_id" in member:
                 validate_legacy_key(member["event_id"], required=True)
-            original = slices.get(("alerts", index, "payload") if batch else (), b"")
+            # A single body is one object: its exact bytes are the body without the
+            # surrounding JSON whitespace, as object_slices(raw)[()] would return.
+            original = slices[index] if batch else raw.strip(b" \t\n\r")
             results.append((validate_native(member["payload"], version, original), original, None))
         except AppError as error:
             results.append(
@@ -59,12 +70,69 @@ def validate_request(raw, version, request_key=None):
     return results
 
 
+def _payload_slices(raw):
+    """Exact ``alerts[i].payload`` object bytes of a validated ``{"alerts": [...]}`` body.
+
+    Equal to ``object_slices(raw).get(("alerts", i, "payload"), b"")`` for every
+    member, but only the envelope and member keys are walked in Python; each member
+    value is skipped by the C decoder instead of being descended into.
+    """
+    text = raw.decode("utf-8")
+    space = _JSON_SPACE.match
+    decode = _DECODER.raw_decode
+    found = []
+    try:
+        # The parse proved an object whose only key is "alerts" with an array value.
+        pos = space(text, space(text).end() + 1).end()
+        _, pos = decode(text, pos)
+        pos = space(text, space(text, pos).end() + 1).end() + 1
+        while True:
+            pos = space(text, pos).end()
+            if text[pos] == "]":
+                return found
+            original = b""
+            if text[pos] == "{":
+                pos += 1
+                while True:
+                    pos = space(text, pos).end()
+                    if text[pos] == "}":
+                        pos += 1
+                        break
+                    key, pos = decode(text, pos)
+                    start = space(text, space(text, pos).end() + 1).end()
+                    _, pos = decode(text, start)
+                    if key == "payload" and text[start] == "{":
+                        original = text[start:pos].encode("utf-8")
+                    pos = space(text, pos).end()
+                    if text[pos] == ",":
+                        pos += 1
+            else:
+                _, pos = decode(text, pos)
+            found.append(original)
+            pos = space(text, pos).end()
+            if text[pos] == ",":
+                pos += 1
+    except RecursionError:
+        raise AppError("invalid_json", "JSON nesting is excessive.", 400) from None
+
+
 def validate_legacy_key(value, *, required=False):
     # Accepted migration syntax only. It provides no resubmission deduplication.
     if (required or value is not None) and (
         not isinstance(value, str) or not RETRY_ID.fullmatch(value)
     ):
         raise AppError("invalid_retry_id", "Invalid legacy sender identifier.", 422)
+
+
+ATTEMPT_SECONDS = 1.1  # Application bound for one broker acknowledgement attempt.
+POLL_SECONDS = 0.1  # Poll-thread wake-up interval; delivery reports return immediately.
+_UNCONFIRMED = object()
+
+
+def _settle(future, error):
+    # Runs on the waiting loop. A cancelled or timed-out wait has already finished.
+    if not future.done():
+        future.set_result(error)
 
 
 class KafkaPublisher:
@@ -86,20 +154,74 @@ class KafkaPublisher:
             }
         )
 
-    async def publish(self, topic, key, value):
-        outcomes = []
-        self.producer.produce(
-            topic, key=key, value=value, on_delivery=lambda error, message: outcomes.append(error)
+        # One poll thread serves every delivery report; each publish awaits its own
+        # future on the caller's event loop, so several loops may share the producer.
+        self._lock = threading.Lock()
+        self._pending = set()
+        self._closed = False
+        self._stopping = threading.Event()
+        self._poller = threading.Thread(
+            target=self._poll_deliveries, name="appchi-kafka-delivery", daemon=True
         )
-        deadline = monotonic() + 1.1
-        while not outcomes and monotonic() < deadline:
-            self.producer.poll(0)
-            await asyncio.sleep(0.005)
-        if not outcomes or outcomes[0] is not None:
-            raise RuntimeError("kafka_publish_unconfirmed")
+        self._poller.start()
+
+    def _poll_deliveries(self):
+        while not self._stopping.is_set():
+            try:
+                # Returns as soon as delivery reports were served.
+                self.producer.poll(POLL_SECONDS)
+            except Exception:
+                # A failing callback or transient client error must not stop delivery
+                # reporting for the remaining in-flight records.
+                continue
+
+    @staticmethod
+    def _report(loop, future, error):
+        # Runs on the poll (or flush) thread; never raises into librdkafka.
+        try:
+            loop.call_soon_threadsafe(_settle, future, error)
+        except RuntimeError:
+            pass  # The waiting loop has closed; nobody awaits this outcome anymore.
+
+    async def publish(self, topic, key, value):
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
+        entry = (loop, future)
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("kafka_publish_unconfirmed")
+            self._pending.add(entry)
+        try:
+            self.producer.produce(
+                topic,
+                key=key,
+                value=value,
+                on_delivery=lambda error, message: self._report(loop, future, error),
+            )
+            try:
+                async with asyncio.timeout(ATTEMPT_SECONDS):
+                    error = await future
+            except TimeoutError:
+                error = _UNCONFIRMED
+            if error is not None:
+                raise RuntimeError("kafka_publish_unconfirmed")
+        finally:
+            with self._lock:
+                self._pending.discard(entry)
 
     def close(self):
-        self.producer.flush(1.1)
+        with self._lock:
+            self._closed = True
+        self._stopping.set()
+        self._poller.join()
+        try:
+            self.producer.flush(ATTEMPT_SECONDS)
+        finally:
+            # Anything still unconfirmed fails now instead of waiting out its bound.
+            with self._lock:
+                pending, self._pending = list(self._pending), set()
+            for loop, future in pending:
+                self._report(loop, future, _UNCONFIRMED)
 
 
 class KafkaAdmission:
@@ -108,10 +230,12 @@ class KafkaAdmission:
         self.topic = f"appchi.{environment}.alerts.received"
         self.global_tenant_id = UUID(str(global_tenant_id))
 
-    async def admit(self, raw, version, request_key=None, gateway=None, *, received_at=None):
+    async def admit(
+        self, raw, version, request_key=None, gateway=None, *, received_at=None, parsed=UNPARSED
+    ):
         at = received_at or datetime.now(UTC)
         routing = self._routing(version, gateway)
-        members = validate_request(raw, version, request_key)
+        members = validate_request(raw, version, request_key, parsed=parsed)
         return await self._publish(members, version, routing, at, deadline=self._deadline(gateway))
 
     async def admit_grafana(self, raw, request_key, gateway, *, received_at=None):

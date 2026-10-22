@@ -85,8 +85,8 @@ runtime = ["authlib (>=1.5,<2)", "cel-expr-python (==0.1.3)", "confluent-kafka (
 [package.source]
 type = "git"
 url = "https://github.com/appchi-alert-operations/appchi-domain.git"
-reference = "6d4cfa6f1acf11ef3a369a002f0cceb99bab2e3c"
-resolved_reference = "6d4cfa6f1acf11ef3a369a002f0cceb99bab2e3c"
+reference = "d4fb748ca199cdf75a42544f6a3aeb4f358a9e77"
+resolved_reference = "d4fb748ca199cdf75a42544f6a3aeb4f358a9e77"
 
 [[package]]
 name = "authlib"
@@ -1514,4 +1514,4 @@ test = ["aiohttp (>=3.10.5)", "flake8 (>=6.1,<7.0)", "mypy (>=0.800)", "psutil",
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "cb4bcb80c41692661cbb1d5dde670155a3760e4b37f85e3717480f44420b0102"
+content-hash = "fb34ff6d0301d67ccddb03f0eca9a621fea53a0df614983fa9a89af995194500"
