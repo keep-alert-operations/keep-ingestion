@@ -63,6 +63,8 @@ def connection():
             if not message.get("more_body"):
                 break
         seen.append((scope["path"], dict(scope["headers"]), len(body)))
+        if scope["path"] == "/wait":
+            await run.gate.wait()
         await send({"type": "http.response.start", "status": 200,
                     "headers": [(b"content-length", b"2")]})
         await send({"type": "http.response.body", "body": b"ok"})
@@ -79,6 +81,7 @@ def connection():
         for _ in range(20):
             loop.run_until_complete(asyncio.sleep(0))
 
+    run.gate = asyncio.Event()  # holds the response to /wait until set
     yield protocol, transport, seen, run
     for task in list(protocol.tasks):
         task.cancel()
@@ -89,6 +92,25 @@ def connection():
 def _feed(protocol, *reads):
     for data in reads:
         protocol.data_received(data)
+
+
+@pytest.mark.parametrize("bad", [
+    b"GET /2 HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n",
+    b"GET /2 HTTP/1.1\r\nHost: x\r\nX-Big: " + b"a" * 20 * 1024 + b"\r\n\r\n",
+    b"GARBAGE\r\n\r\n",
+], ids=["duplicate-host", "oversized-head", "parser-error"])
+def test_invalid_pipelined_head_closes_without_writing_over_a_pending_response(
+        connection, bad):
+    protocol, transport, seen, run = connection
+    _feed(protocol, b"POST /wait HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\nok")
+    run()
+    assert [path for path, _, _ in seen] == ["/wait"]
+    _feed(protocol, bad)
+    run()
+    assert transport.written == [] and transport.closed
+    run.gate.set()
+    run()
+    assert transport.written == [] and [path for path, _, _ in seen] == ["/wait"]
 
 
 def test_oversized_incomplete_head_gets_exactly_one_400_and_close(connection):

@@ -102,14 +102,18 @@ class BoundedHttpToolsProtocol(HttpToolsProtocol):
     def _reject(self):
         self.in_message = False
         self.logger.warning(INVALID_REQUEST)
+        self.send_400_response(INVALID_REQUEST)
+
+    def send_400_response(self, msg):
+        # Also reached from uvicorn for parser and callback errors on pipelined data.
         cycle = self.cycle
         if cycle is not None and not cycle.response_complete:
-            # A 400 could interleave with a response the application may still send.
+            # A 400 could precede or interleave with a response still in progress.
             cycle.disconnected = True
             cycle.message_event.set()
             self.transport.close()
-        else:
-            self.send_400_response(INVALID_REQUEST)
+            return
+        super().send_400_response(msg)
 
     def data_received(self, data):
         if self.transport.is_closing():  # e.g. TLS data still flushing after a 400
