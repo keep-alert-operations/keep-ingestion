@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Stateless native v1/v2 and Grafana admission to Kafka, with the Appchi Kong policy plugin."
 requires-python = ">=3.13,<3.14"
 dependencies = [
-  "appchi-domain @ git+https://github.com/appchi-alert-operations/appchi-domain.git@98986b6b7472150d64936f3c0c5c9f3dff61bc8f",
+  "appchi-domain @ git+https://github.com/appchi-alert-operations/appchi-domain.git@3b1bf0e36ce93d9796e0bcb0ec2e9a135212527f",
   "uvicorn>=0.34,<1",
   "httptools>=0.8,<1",
   "uvloop>=0.22,<1; sys_platform != 'win32' and sys_platform != 'cygwin' and platform_python_implementation == 'CPython'",
