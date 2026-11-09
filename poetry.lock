@@ -59,8 +59,8 @@ pydantic = ">=2.8,<3"
 [package.source]
 type = "git"
 url = "https://github.com/appchi-alert-operations/appchi-contracts.git"
-reference = "ee9ae716618bd666dbe87a2db2323005662d77e4"
-resolved_reference = "ee9ae716618bd666dbe87a2db2323005662d77e4"
+reference = "319700818ce83672446b54e60e9c1d7fedfef87f"
+resolved_reference = "319700818ce83672446b54e60e9c1d7fedfef87f"
 
 [[package]]
 name = "appchi-domain"
@@ -73,7 +73,7 @@ files = []
 develop = false
 
 [package.dependencies]
-appchi-contracts = {git = "https://github.com/appchi-alert-operations/appchi-contracts.git", rev = "ee9ae716618bd666dbe87a2db2323005662d77e4"}
+appchi-contracts = {git = "https://github.com/appchi-alert-operations/appchi-contracts.git", rev = "319700818ce83672446b54e60e9c1d7fedfef87f"}
 cryptography = ">=44,<47"
 fastapi = ">=0.115,<1"
 httpx = ">=0.28,<1"
@@ -86,8 +86,8 @@ runtime = ["authlib (>=1.5,<2)", "cel-expr-python (==0.1.3)", "confluent-kafka (
 [package.source]
 type = "git"
 url = "https://github.com/appchi-alert-operations/appchi-domain.git"
-reference = "1a98a68d3ef123468d4f44a9a4acc09e513a0e11"
-resolved_reference = "1a98a68d3ef123468d4f44a9a4acc09e513a0e11"
+reference = "440e3bea8c7dca85a37e9ddb54eb0d09b6608f65"
+resolved_reference = "440e3bea8c7dca85a37e9ddb54eb0d09b6608f65"
 
 [[package]]
 name = "authlib"
@@ -1552,4 +1552,4 @@ test = ["aiohttp (>=3.10.5)", "flake8 (>=6.1,<7.0)", "mypy (>=0.800)", "psutil",
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "a879a4e74d43710c988ad9bb5ac4a58bd3a8617c94c02f806b52e25a19540672"
+content-hash = "2a5103236d779980c442f9bea255793a010d3b9d5121dfe07f6ad67f7a2ac3fb"
