@@ -9,9 +9,9 @@ from uuid import uuid4
 
 import pytest
 
-from appchi.ingestion import kafka_admission
-from appchi.ingestion.kafka_admission import KafkaAdmission, KafkaPublisher
-from appchi.ingestion.native import canonical
+from keep.ingestion import kafka_admission
+from keep.ingestion.kafka_admission import KafkaAdmission, KafkaPublisher
+from keep.ingestion.native import canonical
 
 
 class FakeProducer:
@@ -76,7 +76,7 @@ def long_poll_tick(monkeypatch):
 @pytest.fixture
 def fake(monkeypatch):
     import confluent_kafka
-    import appchi.service_clients
+    import keep.service_clients
 
     made = []
 
@@ -85,7 +85,7 @@ def fake(monkeypatch):
         return made[-1]
 
     monkeypatch.setattr(confluent_kafka, "Producer", factory)
-    monkeypatch.setattr(appchi.service_clients, "kafka_options", lambda settings: {})
+    monkeypatch.setattr(keep.service_clients, "kafka_options", lambda settings: {})
     publisher = KafkaPublisher(SimpleNamespace(kafka_bootstrap="fake:9092"))
     yield publisher, made[0]
     publisher.close()

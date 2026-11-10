@@ -1,17 +1,17 @@
 local json = require "cjson.safe"
-local policy = require "kong.plugins.appchi-policy.policy"
+local policy = require "kong.plugins.keep-policy.policy"
 local plugin = { PRIORITY = 1200, VERSION = "1.0.0" }
 local identity_headers = {
   "x-consumer-id", "x-consumer-custom-id", "x-consumer-username",
-  "x-credential-identifier", "x-appchi-operator-id", "x-appchi-tenant-id",
-  "x-appchi-policy-generation", "x-appchi-routing-names",
-  "x-appchi-authorized-at",
+  "x-credential-identifier", "x-keep-operator-id", "x-keep-tenant-id",
+  "x-keep-policy-generation", "x-keep-routing-names",
+  "x-keep-authorized-at",
 }
 
 function plugin:access(conf)
   for _, header in ipairs(identity_headers) do kong.service.request.clear_header(header) end
   if conf.probe then
-    if not conf.probe_token or kong.request.get_header("x-appchi-probe-token") ~= conf.probe_token then
+    if not conf.probe_token or kong.request.get_header("x-keep-probe-token") ~= conf.probe_token then
       return kong.response.exit(401, {message = "Private proof required"})
     end
     local body = kong.request.get_body()
@@ -37,7 +37,7 @@ function plugin:access(conf)
   if not result then return kong.response.exit(503, {message = "Policy unavailable"}) end
   if not result.allowed then return kong.response.exit(401, {message = "Credential inactive"}) end
   if conf.probe_active then
-    if not conf.probe_token or kong.request.get_header("x-appchi-probe-token") ~= conf.probe_token then
+    if not conf.probe_token or kong.request.get_header("x-keep-probe-token") ~= conf.probe_token then
       return kong.response.exit(401)
     end
     result.member_id = kong.node.get_id()
@@ -49,10 +49,10 @@ function plugin:access(conf)
   kong.service.request.clear_header("authorization")
   kong.service.request.set_header("x-consumer-id", consumer.id)
   kong.service.request.set_header("x-credential-identifier", credential.id)
-  kong.service.request.set_header("x-appchi-operator-id", result.operator_id)
-  kong.service.request.set_header("x-appchi-tenant-id", result.tenant_id)
-  kong.service.request.set_header("x-appchi-policy-generation", result.generation)
-  kong.service.request.set_header("x-appchi-authorized-at", string.format("%.3f", authorized_at))
-  kong.service.request.set_header("x-appchi-routing-names", ngx.encode_base64(json.encode(result.routing_names)))
+  kong.service.request.set_header("x-keep-operator-id", result.operator_id)
+  kong.service.request.set_header("x-keep-tenant-id", result.tenant_id)
+  kong.service.request.set_header("x-keep-policy-generation", result.generation)
+  kong.service.request.set_header("x-keep-authorized-at", string.format("%.3f", authorized_at))
+  kong.service.request.set_header("x-keep-routing-names", ngx.encode_base64(json.encode(result.routing_names)))
 end
 return plugin

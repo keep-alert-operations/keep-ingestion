@@ -9,8 +9,8 @@ import math
 import time
 from uuid import UUID
 
-from appchi.ingestion.http_protocol import BoundedHttpToolsProtocol
-from appchi.shared.errors import AppError
+from keep.ingestion.http_protocol import BoundedHttpToolsProtocol
+from keep.shared.errors import AppError
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,7 @@ class GatewayIdentity:
 
 
 def gateway_identity(request):
-    if not request.scope.get("appchi.gateway_peer_verified"):
+    if not request.scope.get("keep.gateway_peer_verified"):
         raise AppError("invalid_credential", "Verified private gateway connection required.", 401)
     values = []
     for header in ("x-consumer-id", "x-credential-identifier"):
@@ -40,7 +40,7 @@ def gateway_identity(request):
     if request.headers.getlist("x-api-key") or request.headers.getlist("authorization"):
         raise AppError("invalid_credential", "Gateway credential stripping is required.", 401)
     context = []
-    for header in ("x-appchi-operator-id", "x-appchi-tenant-id"):
+    for header in ("x-keep-operator-id", "x-keep-tenant-id"):
         found = request.headers.getlist(header)
         try:
             if len(found) != 1 or str(UUID(found[0])) != found[0]:
@@ -48,9 +48,9 @@ def gateway_identity(request):
         except ValueError:
             raise AppError("invalid_credential", "Invalid gateway policy context.", 401) from None
         context.append(found[0])
-    generations = request.headers.getlist("x-appchi-policy-generation")
-    names = request.headers.getlist("x-appchi-routing-names")
-    authorized = request.headers.getlist("x-appchi-authorized-at")
+    generations = request.headers.getlist("x-keep-policy-generation")
+    names = request.headers.getlist("x-keep-routing-names")
+    authorized = request.headers.getlist("x-keep-authorized-at")
     try:
         if len(authorized) != 1:
             raise ValueError()
@@ -106,7 +106,7 @@ def private_protocol(allowed_fingerprints):
                     and peer
                     and sha256(peer).hexdigest() in approved
                 )
-                scope = {**scope, "appchi.gateway_peer_verified": verified}
+                scope = {**scope, "keep.gateway_peer_verified": verified}
                 await original(scope, receive, send)
 
             self.app = verified_app

@@ -8,7 +8,7 @@ from datetime import UTC, datetime
 from time import monotonic, time
 from uuid import UUID, uuid4
 
-from appchi.ingestion.native import (
+from keep.ingestion.native import (
     RETRY_ID,
     canonical,
     format_native_time,
@@ -16,11 +16,11 @@ from appchi.ingestion.native import (
     parse_json,
     validate_native,
 )
-from appchi.shared.errors import AppError
-from appchi.serialization import wire
+from keep.shared.errors import AppError
+from keep.serialization import wire
 
 
-from appchi.ingestion.keys import received_key as received_key
+from keep.ingestion.keys import received_key as received_key
 
 
 UNPARSED = object()
@@ -138,7 +138,7 @@ def _settle(future, error):
 class KafkaPublisher:
     def __init__(self, settings):
         from confluent_kafka import Producer
-        from appchi.service_clients import kafka_options
+        from keep.service_clients import kafka_options
 
         if not settings.kafka_bootstrap:
             raise ValueError("Kafka admission requires a broker binding")
@@ -161,7 +161,7 @@ class KafkaPublisher:
         self._closed = False
         self._stopping = threading.Event()
         self._poller = threading.Thread(
-            target=self._poll_deliveries, name="appchi-kafka-delivery", daemon=True
+            target=self._poll_deliveries, name="keep-kafka-delivery", daemon=True
         )
         self._poller.start()
 
@@ -227,7 +227,7 @@ class KafkaPublisher:
 class KafkaAdmission:
     def __init__(self, publisher, *, environment, global_tenant_id):
         self.publisher = publisher
-        self.topic = f"appchi.{environment}.alerts.received"
+        self.topic = f"keep.{environment}.alerts.received"
         self.global_tenant_id = UUID(str(global_tenant_id))
 
     async def admit(
@@ -239,7 +239,7 @@ class KafkaAdmission:
         return await self._publish(members, version, routing, at, deadline=self._deadline(gateway))
 
     async def admit_grafana(self, raw, request_key, gateway, *, received_at=None):
-        from appchi.operators.grafana import ADAPTER_VERSION, OperatorRouting, map_webhook
+        from keep.operators.grafana import ADAPTER_VERSION, OperatorRouting, map_webhook
 
         at = received_at or datetime.now(UTC)
         routing = self._routing("v2", gateway)
@@ -288,7 +288,7 @@ class KafkaAdmission:
         )
 
     async def _publish(self, members, version, routing, at, adapter=None, *, deadline=None):
-        from appchi.event_models import KafkaReceivedEnvelope
+        from keep.event_models import KafkaReceivedEnvelope
 
         tenant, operator, credential, generation = routing
 

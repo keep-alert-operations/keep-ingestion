@@ -1,6 +1,6 @@
 local typedefs = require "kong.db.schema.typedefs"
 return {
-  name = "appchi-policy",
+  name = "keep-policy",
   fields = {
     { consumer = typedefs.no_consumer },
     { protocols = typedefs.protocols_http },
@@ -9,7 +9,7 @@ return {
       { probe_active = { type = "boolean", default = false } },
       { probe_token = { type = "string" } },
       { member_id = { type = "string", required = true } },
-      { clock_health_file = { type = "string", default = "/run/appchi/clock-health.json" } },
+      { clock_health_file = { type = "string", default = "/run/keep/clock-health.json" } },
       { unqualified_local_clock = { type = "boolean", default = false } },
     } } },
   },
