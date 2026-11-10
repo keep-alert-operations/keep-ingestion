@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Stateless native v1/v2 and Grafana admission to Kafka, with the Keep Kong policy plugin."
 requires-python = ">=3.13,<3.14"
 dependencies = [
-  "keep-domain @ git+https://github.com/keep-alert-operations/keep-domain.git@30a6d08596a7342c9b7b9b92fdf85a75d33f7e4c",
+  "keep-domain @ git+https://github.com/keep-alert-operations/keep-domain.git@9e6f24147d2183281e90a875f622604d094cc3e6",
   "uvicorn>=0.34,<1",
   "httptools>=0.8,<1",
   "uvloop>=0.22,<1; sys_platform != 'win32' and sys_platform != 'cygwin' and platform_python_implementation == 'CPython'",
