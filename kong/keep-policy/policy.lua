@@ -2,7 +2,7 @@ local json = require "cjson.safe"
 local _M = {}
 local sha256 = require "resty.sha256"
 local hex = require "resty.string".to_hex
-local clock = require "kong.plugins.appchi-policy.clock"
+local clock = require "kong.plugins.keep-policy.clock"
 function _M.digest(value)
   local hash = sha256:new()
   hash:update(value)
@@ -12,7 +12,7 @@ end
 function _M.evaluate(operator, credential, conf)
   -- Read the Kong policy authority on each request. No node cache can extend a
   -- revoked credential's lifetime; a policy-store outage fails closed.
-  local row, err = kong.db.appchi_policies:select({ operator_id = operator })
+  local row, err = kong.db.keep_policies:select({ operator_id = operator })
   if err or not row then return nil, "policy_unavailable" end
   local doc = json.decode(row.document)
   if not doc or doc.operator_id ~= operator then return nil, "policy_invalid" end

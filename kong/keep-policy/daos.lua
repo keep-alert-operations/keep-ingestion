@@ -1,5 +1,5 @@
 return {{
-  name = "appchi_policies",
+  name = "keep_policies",
   primary_key = { "operator_id" },
   fields = {
     { operator_id = { type = "string", uuid = true, required = true } },

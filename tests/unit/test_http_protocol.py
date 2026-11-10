@@ -7,8 +7,8 @@ import pytest
 import uvicorn
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
-from appchi.ingestion.gateway import private_protocol
-from appchi.ingestion.http_protocol import BoundedHttpToolsProtocol
+from keep.ingestion.gateway import private_protocol
+from keep.ingestion.http_protocol import BoundedHttpToolsProtocol
 
 
 async def _echo(scope, receive, send):
@@ -24,7 +24,7 @@ async def _echo(scope, receive, send):
         {
             "headers": [[k.decode("latin1"), v.decode("latin1")] for k, v in scope["headers"]],
             "body": len(body),
-            "verified": scope.get("appchi.gateway_peer_verified"),
+            "verified": scope.get("keep.gateway_peer_verified"),
         }
     ).encode()
     await send(

@@ -1,6 +1,6 @@
-# Appchi Kong policy plugin
+# Keep Kong policy plugin
 
-`appchi-policy/` is the complete Lua package for the Appchi policy plugin, version
+`keep-policy/` is the complete Lua package for the Keep policy plugin, version
 `1.0.0`. It complements open-source Kong Key Auth. Installation in a shared or
 production Kong fleet is a separate, owner-authorized deployment; this repository
 does not perform it.
@@ -8,17 +8,17 @@ does not perform it.
 ## Package and migrate
 
 The Kong team includes this directory at
-`/usr/local/share/lua/5.1/kong/plugins/appchi-policy` in its qualified image, or
-mounts it read-only for isolated development. Set `KONG_PLUGINS=bundled,appchi-policy`
+`/usr/local/share/lua/5.1/kong/plugins/keep-policy` in its qualified image, or
+mounts it read-only for isolated development. Set `KONG_PLUGINS=bundled,keep-policy`
 on both migration and serving workloads. Run the installed Kong version's normal
 `kong migrations up` / `kong migrations finish` workflow before starting the new
 serving image. A fresh isolated Kong database also needs `kong migrations bootstrap`.
 Do not bootstrap an existing shared database or replace its unrelated configuration.
 
-The plugin migration adds Kong-owned `appchi_policies` and a database trigger that
+The plugin migration adds Kong-owned `keep_policies` and a database trigger that
 rejects lower policy generations and different documents at the same generation.
-This is separate from Appchi's database. Serving requests read Kong's policy
-authority directly and fail closed if it is unavailable; they never query Appchi
+This is separate from Keep's database. Serving requests read Kong's policy
+authority directly and fail closed if it is unavailable; they never query Keep
 PostgreSQL. Policy documents contain no raw API keys. Key Auth retains its normal
 credential storage. Retain denied identities/policy generations across recovery;
 never restore an older policy authority into service without the recovery gate.
@@ -34,13 +34,13 @@ actual execution order against the installed Kong version.
 
 The plugin replaces upstream identity headers and supplies operator, immutable
 tenant, credential, policy generation, permitted routing names, and
-`X-Appchi-Authorized-At`. That timestamp is captured **before** policy evaluation.
+`X-Keep-Authorized-At`. That timestamp is captured **before** policy evaluation.
 Forward solely over the existing private pinned mTLS boundary. Ingress enforces
 the bounded authorization lifetime used by the operator-deletion drain proof.
 
 Provisioning uses two private, non-ingesting routes:
 
-- `probe=true`: authenticate `X-Appchi-Probe-Token` and evaluate the supplied
+- `probe=true`: authenticate `X-Keep-Probe-Token` and evaluate the supplied
   operator/credential IDs with a nonce. Do not attach Key Auth to this route:
   revoked credentials have no retained plaintext and still require denial proof.
 - `probe_active=true`: attach Key Auth and the custom plugin, and require the
@@ -58,7 +58,7 @@ Requalify membership when nodes restart or the serving pool changes.
 
 ## Clock evidence
 
-By default every serving node reads `/run/appchi/clock-health.json`; configure
+By default every serving node reads `/run/keep/clock-health.json`; configure
 `clock_health_file` when the owner mounts another path. The owning platform's
 clock observer must refresh the file, using its actual measurement:
 

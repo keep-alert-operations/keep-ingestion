@@ -10,13 +10,13 @@ import httpx
 import pytest
 from hypothesis import given, settings, strategies as st
 
-import appchi.http as protocol
-import appchi.ingestion.native as native
-from appchi.ingestion import kafka_admission
-from appchi.ingestion.kafka_admission import UNPARSED, _payload_slices, validate_request
-from appchi.ingestion.main import create_app
-from appchi.ingestion.native import canonical, object_slices, parse_json
-from appchi.shared.errors import AppError
+import keep.http as protocol
+import keep.ingestion.native as native
+from keep.ingestion import kafka_admission
+from keep.ingestion.kafka_admission import UNPARSED, _payload_slices, validate_request
+from keep.ingestion.main import create_app
+from keep.ingestion.native import canonical, object_slices, parse_json
+from keep.shared.errors import AppError
 
 GLOBAL = "00000000-0000-4000-8000-000000000001"
 
@@ -209,7 +209,7 @@ def ingest(monkeypatch):
 
     async def asgi(scope, receive, send):
         if scope["type"] == "http" and scope["path"].startswith("/api/ingest/v2/"):
-            scope = dict(scope, **{"appchi.gateway_peer_verified": True})
+            scope = dict(scope, **{"keep.gateway_peer_verified": True})
         await app(scope, receive, send)
 
     return SimpleNamespace(app=asgi, calls=calls, publisher=publisher)
@@ -219,11 +219,11 @@ def gateway_headers():
     return {
         "x-consumer-id": "00000000-0000-4000-8000-0000000000c1",
         "x-credential-identifier": "00000000-0000-4000-8000-0000000000c2",
-        "x-appchi-operator-id": "00000000-0000-4000-8000-0000000000aa",
-        "x-appchi-tenant-id": "00000000-0000-4000-8000-0000000000bb",
-        "x-appchi-policy-generation": "7",
-        "x-appchi-routing-names": base64.b64encode(b'["op"]').decode(),
-        "x-appchi-authorized-at": str(time.time()),
+        "x-keep-operator-id": "00000000-0000-4000-8000-0000000000aa",
+        "x-keep-tenant-id": "00000000-0000-4000-8000-0000000000bb",
+        "x-keep-policy-generation": "7",
+        "x-keep-routing-names": base64.b64encode(b'["op"]').decode(),
+        "x-keep-authorized-at": str(time.time()),
     }
 
 
@@ -253,7 +253,7 @@ async def test_one_parse_per_request(ingest, version, shape, status, records):
     make = v1 if version == "v1" else v2
     headers = {}
     if version == "v2":
-        pytest.importorskip("appchi.ingestion.gateway")
+        pytest.importorskip("keep.ingestion.gateway")
         headers = gateway_headers()
     body = {
         "single": canonical(make()),

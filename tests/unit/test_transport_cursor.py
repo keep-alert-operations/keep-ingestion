@@ -4,9 +4,9 @@ import pytest
 import base64
 import time
 from starlette.requests import Request
-from appchi.ingestion.gateway import gateway_identity, private_protocol
-from appchi.shared.cursors import Cursor
-from appchi.shared.errors import AppError
+from keep.ingestion.gateway import gateway_identity, private_protocol
+from keep.shared.cursors import Cursor
+from keep.shared.errors import AppError
 
 
 def test_cursor_continuations_keep_original_absolute_expiry(cipher):
@@ -26,16 +26,16 @@ def test_gateway_headers_alone_never_authenticate():
         "headers": [
             (b"x-consumer-id", ids[0].encode()),
             (b"x-credential-identifier", ids[1].encode()),
-            (b"x-appchi-operator-id", ids[0].encode()),
-            (b"x-appchi-tenant-id", str(uuid4()).encode()),
-            (b"x-appchi-policy-generation", b"1"),
-            (b"x-appchi-routing-names", base64.b64encode(b'["Operator"]')),
-            (b"x-appchi-authorized-at", str(time.time()).encode()),
+            (b"x-keep-operator-id", ids[0].encode()),
+            (b"x-keep-tenant-id", str(uuid4()).encode()),
+            (b"x-keep-policy-generation", b"1"),
+            (b"x-keep-routing-names", base64.b64encode(b'["Operator"]')),
+            (b"x-keep-authorized-at", str(time.time()).encode()),
         ],
     }
     with pytest.raises(AppError):
         gateway_identity(Request(scope))
-    result = gateway_identity(Request({**scope, "appchi.gateway_peer_verified": True}))
+    result = gateway_identity(Request({**scope, "keep.gateway_peer_verified": True}))
     assert result.consumer_id == ids[0]
     for extra in [
         (b"x-api-key", b"secret"),
@@ -48,7 +48,7 @@ def test_gateway_headers_alone_never_authenticate():
                     {
                         **scope,
                         "headers": scope["headers"] + [extra],
-                        "appchi.gateway_peer_verified": True,
+                        "keep.gateway_peer_verified": True,
                     }
                 )
             )

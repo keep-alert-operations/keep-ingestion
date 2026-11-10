@@ -2,21 +2,21 @@
 
 import os
 import json
-from appchi.visibility.profile import capture_profile
+from keep.visibility.profile import capture_profile
 from contextlib import asynccontextmanager
 from fastapi import Request
 from fastapi.responses import JSONResponse
-from appchi.config import Settings
-from appchi.http import create_http_app
-from appchi.ingestion.kafka_admission import UNPARSED, KafkaAdmission, KafkaPublisher
-from appchi.ingestion.schemas import request_schema, admission_responses
-from appchi.shared.errors import unavailable
+from keep.config import Settings
+from keep.http import create_http_app
+from keep.ingestion.kafka_admission import UNPARSED, KafkaAdmission, KafkaPublisher
+from keep.ingestion.schemas import request_schema, admission_responses
+from keep.shared.errors import unavailable
 
 
 def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
-        app.state.settings = settings or Settings(role=os.getenv("APPCHI_ROLE", "ingestion-api"))
+        app.state.settings = settings or Settings(role=os.getenv("KEEP_ROLE", "ingestion-api"))
         if app.state.settings.role not in ("ingestion-api", "private-ingestion"):
             raise RuntimeError("Ingestion requires a public or private ingestion role")
         path = app.state.settings.capacity_profile
@@ -87,7 +87,7 @@ def create_app(settings=None):
         },
     )
     async def ingest_v2(request: Request):
-        from appchi.ingestion.gateway import gateway_identity
+        from keep.ingestion.gateway import gateway_identity
 
         gateway = gateway_identity(request)
         status, result = await admission(request).admit(
@@ -108,7 +108,7 @@ def create_app(settings=None):
         responses=admission_responses(),
     )
     async def ingest_grafana(request: Request):
-        from appchi.ingestion.gateway import gateway_identity
+        from keep.ingestion.gateway import gateway_identity
 
         gateway = gateway_identity(request)
         status, result = await admission(request).admit_grafana(
