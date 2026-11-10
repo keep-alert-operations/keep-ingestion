@@ -787,8 +787,8 @@ runtime = ["authlib (>=1.5,<2)", "cel-expr-python (==0.1.3)", "confluent-kafka (
 [package.source]
 type = "git"
 url = "https://github.com/keep-alert-operations/keep-domain.git"
-reference = "f24a015c57ec44dc27d13fcb6781eaa20fa878db"
-resolved_reference = "f24a015c57ec44dc27d13fcb6781eaa20fa878db"
+reference = "967330061db25a4eb16373718ca2092548aa64b7"
+resolved_reference = "967330061db25a4eb16373718ca2092548aa64b7"
 
 [[package]]
 name = "ldap3"
@@ -1552,4 +1552,4 @@ test = ["aiohttp (>=3.10.5)", "flake8 (>=6.1,<7.0)", "mypy (>=0.800)", "psutil",
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.13,<3.14"
-content-hash = "2504060041aec7f1611eb5a9b55236cfeb78df75636f72f8650824ee528964f2"
+content-hash = "b5c093ad21cdb12156b1a3d0bca6f3b1f192390c8ed190379663948ca6c1b62d"
