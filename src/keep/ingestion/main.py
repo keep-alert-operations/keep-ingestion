@@ -2,6 +2,8 @@
 
 import os
 import json
+import logging
+from keep.observability import configure_logging, log_event, start_metrics_server
 from keep.visibility.profile import capture_profile
 from contextlib import asynccontextmanager
 from fastapi import Request
@@ -12,11 +14,16 @@ from keep.ingestion.kafka_admission import UNPARSED, KafkaAdmission, KafkaPublis
 from keep.ingestion.schemas import request_schema, admission_responses
 from keep.shared.errors import unavailable
 
+log = logging.getLogger(__name__)
+
 
 def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
-        app.state.settings = settings or Settings(role=os.getenv("KEEP_ROLE", "ingestion-api"))
+        role = settings.role if settings else os.getenv("KEEP_ROLE", "ingestion-api")
+        configure_logging("ingestion", role=role)
+        start_metrics_server()
+        app.state.settings = settings or Settings(role=role)
         if app.state.settings.role not in ("ingestion-api", "private-ingestion"):
             raise RuntimeError("Ingestion requires a public or private ingestion role")
         path = app.state.settings.capacity_profile
@@ -27,9 +34,11 @@ def create_app(settings=None):
             raise RuntimeError("A qualified capacity profile is required outside development")
         app.state.db = None
         app.state.kafka_publisher = KafkaPublisher(app.state.settings)
+        log_event(log, "process_started", role=role)
         try:
             yield
         finally:
+            log_event(log, "process_stopping", role=role, reason="shutdown")
             app.state.kafka_publisher.close()
 
     app = create_http_app(lifespan)
