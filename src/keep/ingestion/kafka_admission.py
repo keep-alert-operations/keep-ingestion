@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import re
 import threading
 from datetime import UTC, datetime
@@ -9,18 +10,81 @@ from time import monotonic, time
 from uuid import UUID, uuid4
 
 from keep.ingestion.native import (
+    OPTIONAL,
     RETRY_ID,
+    V1,
+    V2,
     canonical,
     format_native_time,
     identity,
     parse_json,
     validate_native,
 )
+from keep.observability import Flow, alert_fields, register
 from keep.shared.errors import AppError
 from keep.serialization import wire
 
 
 from keep.ingestion.keys import received_key as received_key
+
+log = logging.getLogger(__name__)
+
+# The steps one submitted alert takes inside ingestion (observability 3). Each is
+# its own record. All of them carry the request ID and the member index and, once
+# the alert is valid, its delivery ID and key digest.
+register(
+    "alert_received",
+    logging.INFO,
+    "Received {api} alert at index {member} of {count}",
+    "Ingestion read one alert from a request body. The first step of every alert.",
+    required=("api", "member", "count"),
+    outcome="success",
+)
+register(
+    "alert_validated",
+    logging.INFO,
+    "Alert passed {api} validation; delivery {delivery_id}",
+    "The alert is valid. Its delivery ID and key digest now exist and are on every "
+    "later record of this delivery in every service.",
+    required=("api", "delivery_id", "alert"),
+    outcome="success",
+)
+register(
+    "alert_rejected",
+    logging.INFO,
+    "Alert rejected at validation: {error_code}",
+    "The sender was answered 422 for this alert. fields names what was wrong. Carries "
+    "the alert as submitted, under its known field names only.",
+    required=("api", "error_code"),
+    outcome="failure",
+)
+register(
+    "alert_publish_failed",
+    logging.WARNING,
+    "Kafka did not confirm delivery {delivery_id} on attempt {attempt}: {reason}",
+    "One publish attempt was not acknowledged within its bound and is retried, up to "
+    "three attempts. reason is timeout, queue_full, unconfirmed or error.",
+    required=("delivery_id", "attempt", "reason"),
+    outcome="failure",
+)
+register(
+    "alert_published",
+    logging.INFO,
+    "Kafka confirmed delivery {delivery_id} on attempt {attempt}",
+    "The broker acknowledged the alert and the sender is answered 202. The source "
+    "processor continues this delivery; search keep.delivery_id.",
+    required=("delivery_id", "attempt", "alert"),
+    outcome="success",
+)
+register(
+    "alert_unconfirmed",
+    logging.WARNING,
+    "Kafka never confirmed delivery {delivery_id} ({reason}); the sender was told to retry",
+    "No attempt was acknowledged, so the sender is answered 503 for this alert. The "
+    "record may still be in Kafka. Carries the whole alert. Check the broker.",
+    required=("delivery_id", "reason", "alert"),
+    outcome="failure",
+)
 
 
 UNPARSED = object()
@@ -28,8 +92,12 @@ _JSON_SPACE = re.compile(r"[ \t\n\r]*")
 _DECODER = json.JSONDecoder()
 
 
-def validate_request(raw, version, request_key=None, *, parsed=UNPARSED):
-    """Validate a native body; ``parsed`` is the ``parse_json(raw)`` value when already known."""
+def validate_request(raw, version, request_key=None, *, parsed=UNPARSED, submitted=None):
+    """Validate a native body; ``parsed`` is the ``parse_json(raw)`` value when already known.
+
+    A ``submitted`` list receives the payload of each member as it was sent, so a
+    rejected member can still be recorded with the fields it had.
+    """
     if len(raw) > 4 * 1024 * 1024:
         raise AppError("body_too_large", "Ingestion body exceeds 4 MiB.", 413)
     if parsed is UNPARSED:
@@ -46,6 +114,8 @@ def validate_request(raw, version, request_key=None, *, parsed=UNPARSED):
     validate_legacy_key(request_key)
     slices = _payload_slices(raw) if batch else None
     members = parsed["alerts"] if batch else [{"payload": parsed}]
+    if submitted is not None:
+        submitted.extend(m.get("payload") if isinstance(m, dict) else None for m in members)
     results = []
     for index, member in enumerate(members):
         try:
@@ -129,6 +199,42 @@ POLL_SECONDS = 0.1  # Poll-thread wake-up interval; delivery reports return imme
 _UNCONFIRMED = object()
 
 
+def _position(message):
+    """Partition and offset of an acknowledged record, when the client reports them."""
+    try:
+        return int(message.partition()), int(message.offset())
+    except Exception:
+        return None
+
+
+def _failure_reason(error):
+    if isinstance(error, TimeoutError):
+        return "timeout"
+    if isinstance(error, BufferError):
+        return "queue_full"
+    if isinstance(error, RuntimeError) and str(error) == "kafka_publish_unconfirmed":
+        return "unconfirmed"
+    return "error"
+
+
+def _wrong_fields(error, shown, version):
+    """Names of the fields a rejected member got wrong.
+
+    Validation names the field for a bad value. For missing or unknown fields it
+    names none, so they are worked out here from what was sent.
+    """
+    names = []
+    for entry in error.get("fields") or ():
+        name = entry.get("path") if isinstance(entry, dict) else entry
+        if name is not None:
+            names.append(str(name))
+    if not names and error.get("code") == "invalid_fields" and isinstance(shown, dict):
+        required = V1 if version == "v1" else V2
+        sent = {str(name) for name in shown}
+        names = sorted(required - sent) + sorted(sent - required - OPTIONAL[version])
+    return names or None
+
+
 def _settle(future, error):
     # Runs on the waiting loop. A cancelled or timed-out wait has already finished.
     if not future.done():
@@ -142,9 +248,12 @@ class KafkaPublisher:
 
         if not settings.kafka_bootstrap:
             raise ValueError("Kafka admission requires a broker binding")
+        from keep.observability.kafka import statistics_options
+
         self.producer = Producer(
             {
                 **kafka_options(settings),
+                **statistics_options(),
                 "enable.idempotence": True,
                 "acks": "all",
                 "max.in.flight.requests.per.connection": 5,
@@ -184,20 +293,24 @@ class KafkaPublisher:
             pass  # The waiting loop has closed; nobody awaits this outcome anymore.
 
     async def publish(self, topic, key, value):
+        """Publish one record; return its (partition, offset) once the broker confirms."""
         loop = asyncio.get_running_loop()
         future = loop.create_future()
         entry = (loop, future)
+        confirmed = []
+
+        def delivered(error, message):
+            # Runs on the poll thread, before the waiting loop is told.
+            if error is None:
+                confirmed.append(_position(message))
+            self._report(loop, future, error)
+
         with self._lock:
             if self._closed:
                 raise RuntimeError("kafka_publish_unconfirmed")
             self._pending.add(entry)
         try:
-            self.producer.produce(
-                topic,
-                key=key,
-                value=value,
-                on_delivery=lambda error, message: self._report(loop, future, error),
-            )
+            self.producer.produce(topic, key=key, value=value, on_delivery=delivered)
             try:
                 async with asyncio.timeout(ATTEMPT_SECONDS):
                     error = await future
@@ -205,6 +318,7 @@ class KafkaPublisher:
                 error = _UNCONFIRMED
             if error is not None:
                 raise RuntimeError("kafka_publish_unconfirmed")
+            return confirmed[0] if confirmed else None
         finally:
             with self._lock:
                 self._pending.discard(entry)
@@ -235,8 +349,11 @@ class KafkaAdmission:
     ):
         at = received_at or datetime.now(UTC)
         routing = self._routing(version, gateway)
-        members = validate_request(raw, version, request_key, parsed=parsed)
-        return await self._publish(members, version, routing, at, deadline=self._deadline(gateway))
+        submitted = []
+        members = validate_request(raw, version, request_key, parsed=parsed, submitted=submitted)
+        return await self._publish(
+            members, version, routing, at, deadline=self._deadline(gateway), submitted=submitted
+        )
 
     async def admit_grafana(self, raw, request_key, gateway, *, received_at=None):
         from keep.operators.grafana import ADAPTER_VERSION, OperatorRouting, map_webhook
@@ -287,21 +404,50 @@ class KafkaAdmission:
             gateway.policy_generation,
         )
 
-    async def _publish(self, members, version, routing, at, adapter=None, *, deadline=None):
+    async def _publish(
+        self, members, version, routing, at, adapter=None, *, deadline=None, submitted=None
+    ):
         from keep.event_models import KafkaReceivedEnvelope
 
         tenant, operator, credential, generation = routing
+        api = "grafana" if adapter else version
+        provider = "grafana" if adapter else "api"
 
         async def member_result(index, member):
             payload, original, error = member
+            # A rejected member has no validated payload; show what was sent.
+            shown = payload
+            if shown is None and submitted is not None and index < len(submitted):
+                shown = submitted[index]
+            flow = Flow(
+                log,
+                alert=alert_fields(shown, native_version=version, provider=provider),
+                api=api,
+                member=index,
+                count=len(members),
+                tenant_id=tenant,
+                operator_id=operator,
+            )
             if error:
+                flow.step("alert_received", detail=True)
+                flow.step(
+                    "alert_rejected",
+                    alert=alert_fields(shown, whole=True),
+                    error_code=error["code"],
+                    fields=_wrong_fields(error, shown, version),
+                )
                 return {"index": index, "status": 422, "disposition": "rejected", "error": error}
             payload = dict(payload)
             defaulted = "time_created" not in payload
             if defaulted:
                 payload["time_created"] = format_native_time(at.replace(microsecond=0))
-            key, _, material = identity(payload, version, operator)
+            key, key_digest, material = identity(payload, version, operator)
             delivery = str(uuid4())
+            # Validation ran before this point. A valid alert's steps all carry its
+            # delivery ID, so one search by that ID returns them from the first on.
+            flow.know(delivery_id=delivery, alert=alert_fields(payload, key_digest=key_digest))
+            flow.step("alert_received", detail=True)
+            flow.step("alert_validated", detail=True, time_defaulted=defaulted)
             body = KafkaReceivedEnvelope.model_validate(
                 {
                     "schema_version": 2,
@@ -323,13 +469,24 @@ class KafkaAdmission:
             )
             encoded = canonical(body.model_dump())
             partition_key = received_key(tenant, payload["application"], key)
-            for _ in range(3):
+            reason = "attempts"
+            for attempt in range(1, 4):
                 try:
                     remaining = min(1.1, deadline - monotonic())
                     if remaining <= 0:
+                        reason = "deadline"
                         break
-                    await asyncio.wait_for(
+                    confirmed = await asyncio.wait_for(
                         self.publisher.publish(self.topic, partition_key, encoded), remaining
+                    )
+                    partition, offset = confirmed if isinstance(confirmed, tuple) else (None, None)
+                    flow.step(
+                        "alert_published",
+                        attempt=attempt,
+                        topic=self.topic,
+                        partition=partition,
+                        offset=offset,
+                        duration=flow.elapsed(),
                     )
                     return {
                         "index": index,
@@ -337,10 +494,22 @@ class KafkaAdmission:
                         "disposition": "accepted",
                         "received_at": wire(at),
                     }
-                except Exception:
+                except Exception as failure:
                     # An uncertain acknowledgement can still leave a record in Kafka.
                     # Every attempt deliberately reuses the exact UUID/time/bytes.
-                    pass
+                    flow.step(
+                        "alert_publish_failed",
+                        attempt=attempt,
+                        reason=_failure_reason(failure),
+                        error_class=f"{type(failure).__module__}.{type(failure).__qualname__}",
+                    )
+            flow.step(
+                "alert_unconfirmed",
+                alert=alert_fields(payload, whole=True),
+                reason=reason,
+                topic=self.topic,
+                duration=flow.elapsed(),
+            )
             return {
                 "index": index,
                 "status": 503,
