@@ -84,6 +84,22 @@ def create_app(settings=None):
         return JSONResponse(result, status)
 
     @app.post(
+        "/api/ingest/v1/grafana",
+        tags=["ingestion"],
+        status_code=202,
+        responses=admission_responses(),
+    )
+    async def ingest_grafana_v1(request: Request):
+        # Grafana's standard webhook mapped to native v1 for Global (REV-77).
+        status, result = await admission(request).admit_grafana_v1(
+            await request.body(),
+            request.headers.get("idempotency-key"),
+            received_at=request.state.received_at,
+        )
+        result["request_id"] = request.state.request_id
+        return JSONResponse(result, status)
+
+    @app.post(
         "/api/ingest/v2/alerts",
         tags=["ingestion"],
         status_code=202,
