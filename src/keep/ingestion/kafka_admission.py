@@ -377,6 +377,26 @@ class KafkaAdmission:
             deadline=self._deadline(gateway),
         )
 
+    async def admit_grafana_v1(self, raw, request_key, *, received_at=None):
+        """Grafana's standard webhook mapped to native v1 for Global (REV-77).
+
+        Unauthenticated like the native v1 route, so there is no gateway context.
+        """
+        from keep.operators.grafana import NATIVE_V1_ADAPTER_VERSION, map_webhook_v1
+
+        at = received_at or datetime.now(UTC)
+        routing = self._routing("v1", None)
+        validate_legacy_key(request_key)
+        mapped = map_webhook_v1(raw)
+        return await self._publish(
+            [(m.payload, m.original_bytes, m.error) for m in mapped],
+            "v1",
+            routing,
+            at,
+            NATIVE_V1_ADAPTER_VERSION,
+            deadline=self._deadline(None),
+        )
+
     @staticmethod
     def _deadline(gateway):
         authorized = getattr(gateway, "authorized_at", None)
